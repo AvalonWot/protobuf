@@ -63,19 +63,31 @@ namespace SilentOrbit.ProtocolBuffers
                 cw.WriteLine("return instance;");
                 cw.EndBracketSpace();
 
-                cw.Summary("Helper: create a new instance to deserializing into");
-                cw.Bracket(m.OptionAccess + " static " + m.CsType + " DeserializeLengthDelimited(Stream stream)");
-                cw.WriteLine("var instance = new " + m.CsType + "();");
-                cw.WriteLine("DeserializeLengthDelimited(stream, " + refstr + "instance);");
-                cw.WriteLine("return instance;");
-                cw.EndBracketSpace();
+                if (!this.options.UseProtoStuff)
+                {
+                    cw.Summary("Helper: create a new instance to deserializing into");
+                    cw.Bracket(m.OptionAccess + " static " + m.CsType + " DeserializeLengthDelimited(Stream stream)");
+                    cw.WriteLine("var instance = new " + m.CsType + "();");
+                    cw.WriteLine("DeserializeLengthDelimited(stream, " + refstr + "instance);");
+                    cw.WriteLine("return instance;");
+                    cw.EndBracketSpace();
 
-                cw.Summary("Helper: create a new instance to deserializing into");
-                cw.Bracket(m.OptionAccess + " static " + m.CsType + " DeserializeLength(Stream stream, int length)");
-                cw.WriteLine("var instance = new " + m.CsType + "();");
-                cw.WriteLine("DeserializeLength(stream, length, " + refstr + "instance);");
-                cw.WriteLine("return instance;");
-                cw.EndBracketSpace();
+                    cw.Summary("Helper: create a new instance to deserializing into");
+                    cw.Bracket(m.OptionAccess + " static " + m.CsType + " DeserializeLength(Stream stream, int length)");
+                    cw.WriteLine("var instance = new " + m.CsType + "();");
+                    cw.WriteLine("DeserializeLength(stream, length, " + refstr + "instance);");
+                    cw.WriteLine("return instance;");
+                    cw.EndBracketSpace();
+                }
+                else
+                {
+                    cw.Summary("Helper: create a new instance to deserializing into");
+                    cw.Bracket(m.OptionAccess + " static " + m.CsType + " DeserializeGroup(Stream stream, int keyByte)");
+                    cw.WriteLine("var instance = new " + m.CsType + "();");
+                    cw.WriteLine("DeserializeGroup(stream, keyByte, " + refstr + "instance);");
+                    cw.WriteLine("return instance;");
+                    cw.EndBracketSpace();
+                }
 
                 cw.Summary("Helper: put the buffer into a MemoryStream and create a new instance to deserializing into");
                 cw.Bracket(m.OptionAccess + " static " + m.CsType + " Deserialize(byte[] buffer)");
@@ -94,12 +106,18 @@ namespace SilentOrbit.ProtocolBuffers
             cw.EndBracketSpace();
             #endregion
 
-            string[] methods = new string[]
+            string[] methods = !this.options.UseProtoStuff ? new string[]
             {
                 "Deserialize", //Default old one
                 "DeserializeLengthDelimited", //Start by reading length prefix and stay within that limit
-                "DeserializeLength", //Read at most length bytes given by argument
+                "DeserializeLength", //Read at most length bytes given by argument 
+            } :
+            new string[]
+            {
+                "Deserialize", //Default old one
+                "DeserializeGroup", //decode Protostuff group 
             };
+
 
             //Main Deserialize
             foreach (string method in methods)
@@ -118,6 +136,11 @@ namespace SilentOrbit.ProtocolBuffers
                 {
                     cw.Summary("Read the given number of bytes from the stream and deserialze it into the instance.");
                     cw.Bracket(m.OptionAccess + " static " + m.FullCsType + " " + method + "(Stream stream, int length, " + refstr + m.FullCsType + " instance)");
+                }
+                else if (method == "DeserializeGroup")
+                {
+                    cw.Summary("Read and deserialze any field into instance until get end group tag");
+                    cw.Bracket(m.OptionAccess + " static " + m.FullCsType + " " + method + "(Stream stream, int startTag, " + refstr + m.FullCsType + " instance)");
                 }
                 else
                     throw new NotImplementedException();
@@ -177,6 +200,11 @@ namespace SilentOrbit.ProtocolBuffers
                     //Important to read stream position after we have read the length field
                     cw.WriteLine("long limit = stream.Position + length;");
                 }
+                if (method == "DeserializeGroup")
+                {
+                    // get end group tag
+                    cw.WriteLine("int endTag = (startTag & (~7)) | 4;");
+                }
 
                 cw.WhileBracket("true");
 
@@ -221,9 +249,11 @@ namespace SilentOrbit.ProtocolBuffers
                             cw.WritePragma("warning disable 612");
 
                         cw.Dedent();
-                        cw.Comment("Field " + f.ID + " " + f.WireType);
+                        // 因为 Field.WireType 无法接收到Option, 所以就在这里加入patch了
+                        var wireType = (f.ProtoType is ProtoMessage && this.options.UseProtoStuff) ? Wire.Start : f.WireType;
+                        cw.Comment("Field " + f.ID + " " + wireType);
                         cw.Indent();
-                        cw.Case(((f.ID << 3) | (int)f.WireType));
+                        cw.Case(((f.ID << 3) | (int)wireType));
                         if (fieldSerializer.FieldReader(f))
                             cw.WriteLine("continue;");
 
@@ -234,6 +264,16 @@ namespace SilentOrbit.ProtocolBuffers
                     cw.WriteLine();
                 }
                 cw.WriteLine("var key = " + ProtocolParser.Base + ".ReadKey((byte)keyByte, stream);");
+                cw.WriteLine("keyByte = " + "(int)(key.Field << 3) | (int)key.WireType;");
+                if (method == "DeserializeGroup")
+                {
+                    cw.IfBracket("key.WireType == global::SilentOrbit.ProtocolBuffers.Wire.End");
+                    cw.WriteLine("if (key.Field == (startTag >> 3))");
+                    cw.WriteIndent("break;");
+                    cw.WriteLine("else");
+                    cw.WriteIndent("throw new global::SilentOrbit.ProtocolBuffers.ProtocolBufferException(\"Invalid group end tag\");");
+                    cw.EndBracket();
+                }
 
                 cw.WriteLine();
 
@@ -247,7 +287,8 @@ namespace SilentOrbit.ProtocolBuffers
                         continue;
                     cw.Case(f.ID);
                     //Makes sure we got the right wire type
-                    cw.WriteLine("if(key.WireType != global::SilentOrbit.ProtocolBuffers.Wire." + f.WireType + ")");
+                    var wireType = (f.ProtoType is ProtoMessage && this.options.UseProtoStuff) ? Wire.Start : f.WireType;
+                    cw.WriteLine("if(key.WireType != global::SilentOrbit.ProtocolBuffers.Wire." + wireType + ")");
                     cw.WriteIndent("break;"); //This can be changed to throw an exception for unknown formats.
 
                     if (f.OptionDeprecated)
@@ -316,7 +357,7 @@ namespace SilentOrbit.ProtocolBuffers
                 if (f.OptionDeprecated)
                     cw.WritePragma("warning disable 612");
 
-                fieldSerializer.FieldWriter(m, f, cw, options);
+                fieldSerializer.FieldWriter(m, f, cw);
 
                 if (f.OptionDeprecated)
                     cw.WritePragma("warning restore 612");
@@ -344,12 +385,15 @@ namespace SilentOrbit.ProtocolBuffers
             cw.EndBracket();
             cw.EndBracket();
 
-            cw.Summary("Helper: Serialize with a varint length prefix");
-            cw.Bracket(m.OptionAccess + " static void SerializeLengthDelimited(Stream stream, " + m.CsType + " instance)");
-            cw.WriteLine("var data = SerializeToBytes(instance);");
-            cw.WriteLine("global::SilentOrbit.ProtocolBuffers.ProtocolParser.WriteUInt32(stream, (uint)data.Length);");
-            cw.WriteLine("stream.Write(data, 0, data.Length);");
-            cw.EndBracket();
+            if (!options.UseProtoStuff)
+            {
+                cw.Summary("Helper: Serialize with a varint length prefix");
+                cw.Bracket(m.OptionAccess + " static void SerializeLengthDelimited(Stream stream, " + m.CsType + " instance)");
+                cw.WriteLine("var data = SerializeToBytes(instance);");
+                cw.WriteLine("global::SilentOrbit.ProtocolBuffers.ProtocolParser.WriteUInt32(stream, (uint)data.Length);");
+                cw.WriteLine("stream.Write(data, 0, data.Length);");
+                cw.EndBracket();
+            }
         }
     }
 }
