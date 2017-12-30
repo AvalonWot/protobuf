@@ -78,6 +78,32 @@ namespace SilentOrbit.ProtocolBuffers
             WriteUInt32(stream, n);
         }
 
+        public static void ReadSkipGroup(Stream stream, Key start)
+        {
+            while (true)
+            {
+                int keyByte = stream.ReadByte();
+                if (keyByte == -1)
+                {
+                    throw new IOException($"stream bad end");
+                }
+
+                var key = global::SilentOrbit.ProtocolBuffers.ProtocolParser.ReadKey((byte)keyByte, stream);
+                if (key.WireType == Wire.End)
+                {
+                    if (key.Field == start.Field)
+                    {
+                        return;
+                    }
+                    else
+                    {
+                        throw new IOException($"Error group end: start({start.Field}), end({key.Field})");
+                    }
+                }
+                ProtocolParser.SkipKey(stream, key);
+            }
+        }
+
         /// <summary>
         /// Seek past the value for the previously read key.
         /// </summary>
@@ -96,6 +122,9 @@ namespace SilentOrbit.ProtocolBuffers
                     return;
                 case Wire.Varint:
                     ProtocolParser.ReadSkipVarInt(stream);
+                    return;
+                case Wire.Start:
+                    ProtocolParser.ReadSkipGroup(stream, key);
                     return;
                 default:
                     throw new NotImplementedException("Unknown wire type: " + key.WireType);
